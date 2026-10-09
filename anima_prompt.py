@@ -852,12 +852,18 @@ def render(result: dict, with_quality: bool = False, with_negative: bool = False
     if result["misses"]:
         lines.append("")
         lines.append("")
-        lines.append(f"【未命中 · 词典里没有（{len(result['misses'])}）】")
+        lines.append("─" * 46)
+        lines.append(f"⚠ 以下 {len(result['misses'])} 段未进入 prompt，不要复制")
+        lines.append("─" * 46)
         for m in result["misses"]:
             lines.append(f"  ? {m}")
         lines.append("")
-        lines.append("这些片段没有对应 Danbooru tag，按「不脑补」原则未写入 prompt。")
-        lines.append("要补的话，在 data/user_dict.json 里加一条映射即可。")
+        lines.append("本工具只做「中文词 → Danbooru tag」的单点映射，不做语序和动作推理。")
+        lines.append("所以以动作为主的描述会有损失：动词多半没有对应 tag，")
+        lines.append("能命中的往往只是动作的宾语，画面容易变成「静物」。")
+        lines.append("")
+        lines.append("建议：动作部分改用英文短句写在 prompt 末尾，效果比硬凑 tag 好得多。")
+        lines.append("要补词就编辑 data/user_dict.json。")
 
     return "\n".join(lines)
 
@@ -1154,7 +1160,7 @@ def run_gui(demo: str = "") -> None:
                 if n:
                     make_card(body_out, f"g::{g}", g, min(4, max(1, n // 6 + 1)))
             if result["misses"]:
-                make_card(body_out, "miss", "未命中", min(5, max(1, len(result["misses"]) // 2 + 1)), mono=False)
+                make_card(body_out, "miss", "⚠ 未消化（勿复制）", min(5, max(1, len(result["misses"]) // 2 + 1)), mono=False)
 
         for item in state["cards"]:
             key = item["key"]
@@ -1206,11 +1212,22 @@ def run_gui(demo: str = "") -> None:
         result = state["result"] or {"groups": {}, "misses": [], "en_tags": []}
         draw_expand_btn()
         render_cards(result, state["expanded"])
+
         n_hit = sum(len(v) for v in result["groups"].values()) + len(result["en_tags"])
-        if n_hit:
-            totals.configure(text=f"{n_hit} tag · {len(result['misses'])} 未命中")
-        else:
+        if not n_hit and not result["misses"]:
             totals.configure(text="")
+            return
+
+        # 丢失率：被未命中吞掉的原文字符占多少。
+        # 这是本工具最该被看见的数字 —— 工具只做单点映射，动作类描述会大量丢失。
+        raw = result.get("raw", "")
+        lost = sum(len(m) for m in result["misses"])
+        ratio = lost / len(raw) if raw else 0.0
+
+        msg = f"{n_hit} tag"
+        if result["misses"]:
+            msg += f" · 未消化原文 {ratio * 100:.0f}%"
+        totals.configure(text=msg, fg=C["warn"] if ratio >= 0.4 else C["text3"])
 
     # ---------------- 行为 ----------------
     def update_counter(_e=None):
