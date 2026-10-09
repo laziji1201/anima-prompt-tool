@@ -34,7 +34,14 @@
 
 ## 快速开始
 
-### 1. 环境
+### 0. 不想装 Python？直接下 exe
+
+到 [Releases](https://github.com/laziji1201/anima-prompt-tool/releases) 下载 zip，解压后双击 `Anima提示词转换器.exe` 即可，不需要装任何东西。
+
+> **注意**：发布包里的 exe 带扩展词库，但**不带** `Anima-preview.csv`（授权原因），所以**扩展层默认关闭**——只启用了核心词典那 331 条。
+> 想让扩展层生效，把 `Anima-preview.csv` 放进解压后的 `data/` 目录再启动即可。程序会在 exe 同级目录写一份 `anima_debug.txt` 说明它找到了什么。
+
+### 1. 从源码运行
 
 - Python 3.9+（需含 `tkinter`，Windows 官方安装包默认自带）
 - 无需 `pip install` 任何东西

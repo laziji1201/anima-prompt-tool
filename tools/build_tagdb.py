@@ -22,7 +22,6 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_SRC = Path(r"D:\download\tag.sqlite")
 DEFAULT_OUT = ROOT / "data" / "tags.sqlite"
 
 # 拆分多译名用的分隔符
@@ -31,7 +30,7 @@ SPLIT_RE = re.compile(r"[、，,;；/|]+")
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="把原始中英对照表加工成运行时词库")
-    parser.add_argument("--src", default=str(DEFAULT_SRC), help="原始 tag.sqlite 路径")
+    parser.add_argument("--src", required=True, help="原始 tag.sqlite 路径（ffdkj 那份数据）")
     parser.add_argument("--out", default=str(DEFAULT_OUT), help="输出路径")
     args = parser.parse_args()
 
@@ -39,7 +38,7 @@ def main() -> int:
     out = Path(args.out)
     if not src.is_file():
         print(f"找不到源文件：{src}", file=sys.stderr)
-        print("可从 https://github.com/ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table 获取", file=sys.stderr)
+        print("可从 ffdkj/ffdkj-Danbooru_Tag-Chinese-English-Translation-Table 下载 tag.sqlite", file=sys.stderr)
         return 2
 
     out.parent.mkdir(parents=True, exist_ok=True)

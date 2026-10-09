@@ -31,11 +31,13 @@ LOCAL_CANDIDATES = [
 ]
 
 # 常见安装位置（用户本机已有 ComfyUI 技能包时直接复用）
+# 全部走相对路径拼接，不写死任何开发机盘符
 COMMON_CANDIDATES = [
-    Path(r"D:\comfyui\skills\comfyui-good-anima-main\danbooru-tags") / FILENAME,
     Path.home() / "comfyui" / "skills" / "comfyui-good-anima-main" / "danbooru-tags" / FILENAME,
+    Path.home() / "Documents" / "comfyui" / "skills" / "comfyui-good-anima-main" / "danbooru-tags" / FILENAME,
     Path.home() / "Documents" / "comfyui" / "danbooru-tags" / FILENAME,
     ROOT.parent / "danbooru-tags" / FILENAME,
+    ROOT.parent / "skills" / "comfyui-good-anima-main" / "danbooru-tags" / FILENAME,
 ]
 
 HINT = (

@@ -9,6 +9,7 @@ venv/
 # ---- 打包产物 ----
 build/
 dist/
+release/
 *.spec
 
 # ---- 数据（授权原因不入库）----
