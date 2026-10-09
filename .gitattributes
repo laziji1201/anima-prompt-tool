@@ -1,0 +1,14 @@
+# 统一行尾为 LF，避免 Windows 上提交出 CRLF 噪音
+* text=auto eol=lf
+
+# 二进制
+*.png binary
+*.ico binary
+*.jpg binary
+*.csv binary
+*.xlsx binary
+
+# Windows 脚本保留 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

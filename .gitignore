@@ -1,0 +1,23 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# ---- 数据（授权原因不入库）----
+# Anima 官方 tag 表出自 GPL-3.0 项目，需用户自备，见 README
+data/Anima-preview.csv
+data/Anima-preview-alternate.csv
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+
+# ---- 临时 ----
+.tmp/
+*.log
