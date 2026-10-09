@@ -9,11 +9,15 @@ from pathlib import Path
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
-SHOT = ROOT / "docs" / "界面-有内容.png"
+SHOT_DIR = ROOT / "docs"
 
 ctypes.windll.shcore.SetProcessDpiAwareness(1)
 u = ctypes.windll.user32
 g = ctypes.windll.gdi32
+
+
+def shot_dir() -> Path:
+    return SHOT_DIR
 
 
 class RECT(ctypes.Structure):
@@ -94,24 +98,51 @@ def capture(hwnd, path: Path) -> None:
 
 
 def main() -> int:
-    # 用法：python ui_shot.py [--expand] [输出文件名]
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    expand = "--expand" in sys.argv
-    name = args[0] if args else ("界面-展开分类.png" if expand else "界面-折叠.png")
-    shot = SHOT.parent / name
+    # 用法：python ui_shot.py [--expand] [--exe] [--text "文本"] [输出文件名]
+    argv = sys.argv[1:]
+    expand = "--expand" in argv
+    use_exe = "--exe" in argv
 
-    shot.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [sys.executable, "-X", "utf8", str(ROOT / "anima_prompt.py"), "--demo"]
+    demo_text = None
+    if "--text" in argv:
+        i = argv.index("--text")
+        if i + 1 < len(argv):
+            demo_text = argv[i + 1]
+            argv = argv[:i] + argv[i + 2 :]
+
+    args = [a for a in argv if not a.startswith("--")]
+    default_name = "界面-展开分类.png" if expand else "界面-折叠.png"
+    name = args[0] if args else default_name
+    shot = shot_dir() / name
+
+    if use_exe:
+        exe = ROOT / "dist" / "Anima提示词转换器" / "Anima提示词转换器.exe"
+        if not exe.is_file():
+            print(f"找不到 exe：{exe}\n先跑 python tools/build_exe.py")
+            return 1
+        cmd = [str(exe), "--demo"]
+        workdir = str(exe.parent)
+    else:
+        cmd = [sys.executable, "-X", "utf8", str(ROOT / "anima_prompt.py"), "--demo"]
+        workdir = str(ROOT)
+
+    if demo_text:
+        cmd.append(demo_text)
     if expand:
         cmd.append("--expand")
-    proc = subprocess.Popen(cmd, cwd=str(ROOT))
+
+    shot.parent.mkdir(parents=True, exist_ok=True)
+    print(f"启动：{cmd[0]}")
+    if demo_text:
+        print(f"文本：{demo_text}")
+    proc = subprocess.Popen(cmd, cwd=workdir)
     try:
         # 必须限定 pid，否则会撞上残留的同名窗口
         hwnd = find("Anima 中文提示词转换器", pid=proc.pid)
         if not hwnd:
             print("没找到窗口")
             return 1
-        time.sleep(2.6)  # 等自动转换（和展开）跑完
+        time.sleep(3.0)  # 等自动转换（和展开）跑完；exe 冷启动更慢
         capture(hwnd, shot)
         return 0
     finally:

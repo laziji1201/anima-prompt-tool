@@ -18,10 +18,109 @@ Anima 中文提示词转换器（完全离线 / 零第三方依赖）
 
 from __future__ import annotations
 
+import csv
 import json
+import os
 import re
 import sys
 from pathlib import Path
+
+import tagdb
+
+# ---------------------------------------------------------------------------
+# Anima 官方 tag 表（可选）
+# ---------------------------------------------------------------------------
+# 有这张表时，扩展词库只会贡献「Anima 真正认识」的 tag。
+# 没有表就退回纯核心词典模式 —— 宁可少，不塞死词。
+
+
+def write_debug(lines: list[str]) -> None:
+    """
+    把诊断信息写下来。exe 是 --windowed，没有 stderr，只能落文件。
+
+    优先写到程序根目录（不污染用户主目录）；失败再退回用户主目录。
+    不碰 Desktop —— 桌面可能被 OneDrive 重定向，Path.home()/"Desktop" 未必存在。
+    """
+    text = "\n".join(lines) + "\n"
+    print(text, file=sys.stderr)
+    root = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path.cwd()
+    for d in (root, Path.home()):
+        try:
+            (d / "anima_debug.txt").write_text(text, encoding="utf-8")
+            break
+        except Exception:
+            continue
+
+
+def _load_anima_tags() -> set[str]:
+    """加载 Anima 官方 tag 表；找不到返回空集合（表示不校验）。"""
+    path = None
+    err = None
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "tools"))
+        import _tagtable  # type: ignore
+
+        path = _tagtable.find()
+    except Exception as exc:
+        err = exc
+
+    # 打包环境的路径问题不好排查：exe 是 --windowed，没有 stderr。
+    # 所以冻结环境下默认写一份诊断日志，源码运行则要 ANIMA_DEBUG 才写。
+    want_debug = bool(os.environ.get("ANIMA_DEBUG")) or bool(getattr(sys, "frozen", False))
+    if want_debug:
+        lines = [
+            f"frozen  = {getattr(sys, 'frozen', False)}",
+            f"exe     = {sys.executable}",
+            f"cwd     = {Path.cwd()}",
+            f"本文件  = {Path(__file__).resolve()}",
+        ]
+        if err is not None:
+            lines.append(f"导入 _tagtable 失败：{err!r}")
+        lines.append(f"tag 表  = {path}")
+        try:
+            import tagdb as _t
+
+            dbp = _t.app_root() / "data" / "tags.sqlite"
+            lines.append(f"扩展库  = {dbp}  exists={dbp.is_file()}")
+        except Exception as exc:
+            lines.append(f"扩展库定位失败：{exc!r}")
+        write_debug(lines)
+
+    if path is None:
+        return set()
+
+    csv.field_size_limit(64 * 1024 * 1024)
+    out: set[str] = set()
+    try:
+        with path.open("r", encoding="utf-8", newline="") as fh:
+            for row in csv.reader(fh):
+                if len(row) >= 3:
+                    out.add(row[0].strip().lower().replace(" ", "_"))
+    except Exception:
+        return set()
+    return out
+
+
+ANIMA_TAGS = _load_anima_tags()
+
+
+def anima_knows(tag: str) -> bool:
+    """这个 tag 在 Anima 表里吗？表缺失时返回 False（宁可不用，也不塞死词）。"""
+    if not ANIMA_TAGS:
+        return False
+    return tag.strip().lower().replace(" ", "_") in ANIMA_TAGS
+
+
+# 扩展词库（懒加载，窗口第一次用到才读）
+_TAGDB: tagdb.TagDB | None = None
+
+
+def get_tagdb() -> tagdb.TagDB:
+    global _TAGDB
+    if _TAGDB is None:
+        _TAGDB = tagdb.TagDB()
+    return _TAGDB
+
 
 # ---------------------------------------------------------------------------
 # 词典
@@ -442,14 +541,17 @@ STOPWORDS = {
 MAX_STOP_LEN = max((len(s) for s in STOPWORDS), default=1)
 
 
-def _build_index() -> dict[str, list[tuple[str, str, float]]]:
-    index: dict[str, list[tuple[str, str, float]]] = {}
+def _build_index() -> dict[str, list[tuple[str, str, float, str]]]:
+    """关键词 -> [(分组, 英文 tag, 权重, 来源)]，来源取 "core" 或 "ext"。"""
+    index: dict[str, list[tuple[str, str, float, str]]] = {}
     for group, entries in TAG_MAP.items():
-        for cn, tag, weight in entries:
+        for item in entries:
+            cn, tag, weight = item[0], item[1], item[2]
+            src = item[3] if len(item) > 3 else "core"
             for alias in cn.split("|"):
                 alias = alias.strip()
                 if alias:
-                    index.setdefault(alias, []).append((group, tag, weight))
+                    index.setdefault(alias, []).append((group, tag, weight, src))
     return index
 
 
@@ -478,19 +580,20 @@ def _normalize(text: str) -> str:
     return "".join(out)
 
 
-def match_chinese(
-    segment: str,
-) -> tuple[list[tuple[str, str, float]], list[tuple[str, str]]]:
+def match_core(segment: str):
     """
-    中文片段最长优先匹配。
+    核心词典最长优先匹配。
 
-    返回 (命中列表, 未命中片段列表)。
-    未命中片段形如 (类型, 文本)：类型 "miss" 是没命中的原文，
-    "stop" 只作为分隔信号（说明两段未命中之间夹的是语法词，不该粘在一起）。
+    返回 (命中, 未命中片段, 空隙)：
+      命中  = [(中文, 英文, 权重, 起点, 终点)]
+      未命中 = [(类型, 文本)]，类型 "miss" 是没命中的原文，
+               "stop" 只作分隔信号（两段未命中之间夹的是语法词，不该粘在一起）
+      空隙   = [(起点, 终点)] 既没命中、也不是停用词的位置，留给扩展词库补
     原文一律不改写、不猜测。
     """
-    hits: list[tuple[str, str, float]] = []
+    hits: list[tuple[str, str, float, str, int, int]] = []
     misses: list[tuple[str, str]] = []
+    gaps: list[tuple[int, int]] = []
     i = 0
     n = len(segment)
     miss_start = -1
@@ -501,6 +604,8 @@ def match_chinese(
             frag = segment[miss_start:end]
             if frag:
                 misses.append((kind, frag))
+                if kind == "miss":
+                    gaps.append((miss_start, end))
             miss_start = -1
 
     while i < n:
@@ -510,8 +615,8 @@ def match_chinese(
             chunk = segment[i : i + length]
             if chunk in INDEX:
                 flush_miss(i)
-                for entry in INDEX[chunk]:
-                    hits.append(entry)
+                for group, tag, weight, src in INDEX[chunk]:
+                    hits.append((group, tag, weight, src, i, i + length))
                 i += length
                 matched = True
                 break
@@ -527,7 +632,25 @@ def match_chinese(
             i += 1
 
     flush_miss(n)
-    return hits, misses
+    return hits, misses, gaps
+
+
+def match_ext(segment: str, gap: tuple[int, int], db: "tagdb.TagDB"):
+    """
+    用扩展词库补一个空隙。
+
+    只认「Anima 表里有」的 tag —— 33 万条里 93% 的高频词能过这关，
+    但低频段只剩 6.5%，不校验就会把死词灌进 prompt。
+    """
+    start, end = gap
+    frag = segment[start:end]
+    hits, _ = db.match(frag)
+    out: list[tuple[str, str, int, int, int, int]] = []
+    for word, tag, category, count, w_start, w_end in hits:
+        if not anima_knows(tag):
+            continue
+        out.append((word, tag, category, count, start + w_start, start + w_end))
+    return out
 
 
 # 未命中片段里只含这些标点时，视为可拼接的分隔
@@ -582,13 +705,36 @@ def merge_misses(misses: list[tuple[str, str]]) -> list[str]:
     return out
 
 
-def convert(text: str) -> dict:
-    """主转换入口。"""
+def _merge_gaps(gaps: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """把相邻/重叠的空隙并起来，减少查询次数，也让跨停用词的词更可能命中。"""
+    if not gaps:
+        return []
+    ordered = sorted(gaps)
+    out = [list(ordered[0])]
+    for s, e in ordered[1:]:
+        if s <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], e)
+        else:
+            out.append([s, e])
+    return [(s, e) for s, e in out]
+
+
+def convert(text: str, use_ext: bool = True) -> dict:
+    """
+    主转换入口。
+
+    三层来源：
+      核心词典（手工维护、逐条校验）→ 扩展词库（只收 Anima 认识的）→ 未命中（原样报出）
+    """
     normalized = _normalize(text)
-    groups: dict[str, list[str]] = {g: [] for g in GROUP_ORDER}
+    groups: dict[str, list[tuple[str, str]]] = {g: [] for g in GROUP_ORDER}
     seen: set[str] = set()
     misses: list[tuple[str, str]] = []
     en_tags: list[str] = []
+
+    db = get_tagdb() if use_ext else None
+    # 没有 Anima 表就不开扩展层：扩展词库拿不到校验依据，开了会把死词灌进 prompt
+    use_db = bool(db is not None and db.available and ANIMA_TAGS)
 
     for raw in SPLIT_RE.split(normalized):
         segment = raw.strip()
@@ -601,31 +747,52 @@ def convert(text: str) -> dict:
             tag = re.sub(r"\s+", " ", tag).strip()
             if tag and tag not in seen:
                 seen.add(tag)
-                # 词典认识的 tag，归到对应分组；不认识的才进「直接输入」
                 known = TAG_TO_GROUP.get(tag)
                 if known:
-                    groups[known].append(tag)
+                    groups[known].append((tag, "core"))
                 else:
                     en_tags.append(tag)
             continue
 
-        hits, seg_misses = match_chinese(segment)
+        hits, seg_misses, gaps = match_core(segment)
+        covered: set[tuple[int, int]] = {(s, e) for _g, _t, _w, _s2, s, e in hits}
+        ext_entries: list[tuple[int, str, str]] = []      # (位置, tag, 分组)
 
-        if not hits:
-            # 整段没命中：整段报出来，不拆碎
-            if segment not in STOPWORDS:
-                misses.append(("miss", segment))
-            continue
+        # 核心层没覆盖的位置交给扩展词库
+        if use_db and gaps:
+            assert db is not None
+            for gs, ge in _merge_gaps(gaps):
+                for _w, tag, category, _n, s, e in match_ext(segment, (gs, ge), db):
+                    group = tagdb.classify(tag, category)
+                    if group not in groups:
+                        group = "补充细节"
+                    ext_entries.append((s, tag, group))
+                    covered.add((s, e))
 
-        # 命中旁边剩下的，作为分隔标记保留
-        misses.extend(seg_misses)
-
-        for group, tag, weight in hits:
+        # 写入核心命中
+        for group, tag, weight, _src, _s, _e in hits:
             key = tag.lower()
             if key in seen:
                 continue
             seen.add(key)
-            groups[group].append(f"({tag}:{weight})" if weight != 1.0 else tag)
+            groups[group].append((f"({tag}:{weight})" if weight != 1.0 else tag, "core"))
+
+        # 写入扩展命中（按出现位置排；带 ~ 标记，说明来自扩展词库而非手工词典）
+        for _pos, tag, group in sorted(ext_entries):
+            key = tag.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            groups[group].append((f"{tag} ~", "ext"))
+
+        # 仍在空隙里的片段才算未命中
+        for kind, frag in seg_misses:
+            if kind != "miss":
+                misses.append((kind, frag))
+                continue
+            offset = segment.find(frag)
+            if offset < 0 or (offset, offset + len(frag)) not in covered:
+                misses.append((kind, frag))
 
     return {
         "groups": {g: v for g, v in groups.items() if v},
@@ -633,6 +800,20 @@ def convert(text: str) -> dict:
         "en_tags": en_tags,
         "raw": normalized.strip(),
     }
+
+
+def group_tags(result: dict, group: str) -> list[str]:
+    """取某分组的英文 tag 列表（去掉来源标记）。"""
+    return [t for t, _src in result["groups"].get(group, [])]
+
+
+def all_tags(result: dict) -> list[str]:
+    """按固定顺序取出全部 tag，供拼 prompt 用。"""
+    out: list[str] = []
+    for group in GROUP_ORDER:
+        out.extend(group_tags(result, group))
+    out.extend(result["en_tags"])
+    return out
 
 
 def render(result: dict, with_quality: bool = False, with_negative: bool = False) -> str:
@@ -643,26 +824,21 @@ def render(result: dict, with_quality: bool = False, with_negative: bool = False
         lines.append("（无命中）")
 
     for group in GROUP_ORDER:
-        tags = result["groups"].get(group)
-        if tags:
+        entries = result["groups"].get(group)
+        if entries:
             lines.append("")
-            lines.append(f"▍{group}（{len(tags)}）")
-            lines.append(", ".join(tags))
+            lines.append(f"▍{group}（{len(entries)}）")
+            lines.append(", ".join(t for t, _src in entries))
 
     if result["en_tags"]:
         lines.append("")
         lines.append(f"▍直接输入的英文 tag（{len(result['en_tags'])}）")
         lines.append(", ".join(result["en_tags"]))
 
-    flat: list[str] = []
-    for group in GROUP_ORDER:
-        flat.extend(result["groups"].get(group, []))
-    flat.extend(result["en_tags"])
-
     lines.append("")
     lines.append("")
     lines.append("【完整 prompt（可直接粘贴）】")
-    body = ", ".join(flat)
+    body = ", ".join(all_tags(result))
     if with_quality:
         body = f"{QUALITY_PREFIX}, {body}" if body else QUALITY_PREFIX
     lines.append(body if body else "（空）")
@@ -719,7 +895,7 @@ def load_user_dict() -> int:
             continue
         if group not in TAG_MAP:
             group = "补充细节"
-        TAG_MAP[group].append((cn, tag, 1.0))
+        TAG_MAP[group].append((cn, tag, 1.0, "core"))
         count += 1
 
     INDEX = _build_index()
@@ -728,8 +904,8 @@ def load_user_dict() -> int:
     # 重建英文反查表
     TAG_TO_GROUP = {}
     for group, entries in TAG_MAP.items():
-        for _cn, tag, _w in entries:
-            TAG_TO_GROUP.setdefault(tag.lower(), group)
+        for item in entries:
+            TAG_TO_GROUP.setdefault(item[1].lower(), group)
 
     return count
 
@@ -807,11 +983,7 @@ def _flatten_scroll(widget, tk) -> None:
 
 def build_positive(result: dict) -> str:
     """组装正面提示词：质量前缀 + 三个分组 + 直接输入的英文 tag。"""
-    body: list[str] = []
-    for group in GROUP_ORDER:
-        body.extend(result["groups"].get(group, []))
-    body.extend(result["en_tags"])
-    core = ", ".join(body)
+    core = ", ".join(all_tags(result))
     if not core:
         return ""
     return f"{QUALITY_PREFIX}, {core}"
@@ -973,15 +1145,14 @@ def run_gui(demo: str = "") -> None:
         state["cards"] = []
         state["row"] = 0
 
-        groups = result["groups"]
         make_card(body_out, "positive", "正面提示词", 4 if expanded else 3, mono=True)
         make_card(body_out, "negative", "负向提示词", 4, mono=True)
 
         if expanded:
             for g, _col in (("动作姿势", C["g1"]), ("场景背景", C["g2"]), ("补充细节", C["g3"])):
-                tags = groups.get(g, [])
-                if tags:
-                    make_card(body_out, f"g::{g}", g, min(4, max(1, len(tags) // 6 + 1)))
+                n = len(result["groups"].get(g, []))
+                if n:
+                    make_card(body_out, f"g::{g}", g, min(4, max(1, n // 6 + 1)))
             if result["misses"]:
                 make_card(body_out, "miss", "未命中", min(5, max(1, len(result["misses"]) // 2 + 1)), mono=False)
 
@@ -994,7 +1165,7 @@ def run_gui(demo: str = "") -> None:
             elif key == "miss":
                 body = "\n".join(f"? {m}" for m in result["misses"])
             elif key.startswith("g::"):
-                body = ", ".join(groups.get(key[3:], []))
+                body = ", ".join(group_tags(result, key[3:]))
             else:
                 body = ""
 
@@ -1094,13 +1265,19 @@ def run_gui(demo: str = "") -> None:
     root.mainloop()
 
 
+DEMO_TEXT = "一个女孩站在天台边缘，风吹起短发，手里拿着饮料，夜空中星星闪烁，霓虹灯的光打在她脸上"
+
+
 def main() -> None:
-    if len(sys.argv) > 1 and sys.argv[1] == "--demo":
-        run_gui(demo="一个女孩站在天台边缘，风吹起短发，手里拿着饮料，夜空中星星闪烁，霓虹灯的光打在她脸上")
+    argv = [a for a in sys.argv[1:] if a not in ("--expand",)]
+    if argv and argv[0] == "--demo":
+        # --demo 可用自带示例，也可接一段自己的文本：--demo "双马尾少女穿着和服"
+        text = argv[1] if len(argv) > 1 else DEMO_TEXT
+        run_gui(demo=text)
         return
-    if len(sys.argv) > 1:
+    if argv:
         load_user_dict()
-        print(render(convert(" ".join(sys.argv[1:]))))
+        print(render(convert(" ".join(argv))))
     else:
         run_gui()
 

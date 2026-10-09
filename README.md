@@ -27,8 +27,10 @@
 - **折叠 / 展开**：折叠给完整 prompt，展开追加分组明细
 - **每张卡片自带复制按钮**，边框显示该卡的 tag 数与字数
 - **词典经真实校验**：331 条英文 tag 全部逐条比对 Anima 官方 tag 表，0 条在表外
+- **两层词库**：手工核心词典（精确）＋ 33 万条扩展词库（覆盖长尾），扩展命中的 tag 带 `~` 标记
 - **中英混输**：英文 tag 若词典认识会自动归到对应分组
-- **零依赖**：仅用 Python 标准库（`tkinter` / `re` / `json`）
+- **零依赖**：仅用 Python 标准库（`tkinter` / `re` / `json` / `sqlite3`）
+- **可打包成 exe**：`python tools/build_exe.py`
 
 ## 快速开始
 
@@ -37,9 +39,16 @@
 - Python 3.9+（需含 `tkinter`，Windows 官方安装包默认自带）
 - 无需 `pip install` 任何东西
 
-### 2. 自备 Anima tag 表（重要）
+### 2. 两个数据文件（一个随仓库带，一个要自备）
 
-词典校验工具需要 Anima 官方 tag 表 `Anima-preview.csv`。**这个文件不随仓库分发**，原因是它出自 GPL-3.0 许可的 [comfyui-good-anima](https://github.com/ComfyNodePRs/PR-Comfyui-Anima-tools-a0fe04bd) 技能包，打包进来会给本项目引入 GPL 传染。
+程序有两层词库，依赖两个不同的数据文件——**授权情况不一样，别搞混**：
+
+| 文件 | 作用 | 授权 | 是否随仓库 |
+| --- | --- | --- | --- |
+| `data/tags.sqlite` | **扩展词库**，33 万条 Danbooru 中英对照，覆盖核心词典之外的长尾词 | MIT | ✅ 已包含 |
+| `data/Anima-preview.csv` | **Anima 官方 tag 表**，用来校验 tag 是否被模型认识 | GPL-3.0 | ❌ 需自备 |
+
+**关于 `Anima-preview.csv`**：它出自 GPL-3.0 许可的 [comfyui-good-anima](https://github.com/ComfyNodePRs/PR-Comfyui-Anima-tools-a0fe04bd) 技能包，打包进来会给本项目引入 GPL 传染，所以不放仓库。
 
 工具会按这个顺序自动找它：
 
@@ -48,7 +57,11 @@
 3. `data/Anima-preview.csv`（推荐放这里）
 4. 本机常见的 ComfyUI 技能包目录
 
-拿到文件后放进 `data/` 即可。**只跑界面的话这一步可以跳过**——tag 表只被 `tools/` 下的校验脚本使用。
+把文件放进 `data/` 即可。
+
+> **没有它也能用**，但**扩展词库会被自动关闭**，只保留核心词典那 331 条。
+> 这是刻意的：扩展词库里的 tag 必须拿 Anima 表校验过才能进 prompt，
+> 没有校验依据时宁可少给，也不把模型不认识的死词塞进去。
 
 ### 3. 运行
 
@@ -134,9 +147,59 @@ looking_at_viewer     ❌
 
 工具输出的就是这个形式。
 
-## 扩展词库
+## 两层词库
 
-未命中的中文可以自己补映射。编辑 `data/user_dict.json`：
+程序按两层匹配，越靠前越权威：
+
+| 层 | 规模 | 来源 | 标记 |
+| --- | --- | --- | --- |
+| **核心词典** | 331 条 | `anima_prompt.py` 里手工维护，逐条比对过 Anima 表 | 无标记 |
+| **扩展词库** | 334048 行 / 330744 个英文 tag | `data/tags.sqlite`，来自 ffdkj 的中英对照表 | 输出带 `~` |
+
+扩展层补的是核心词典没覆盖的长尾词。实测：
+
+```
+输入：双马尾少女穿着和服在樱花树下弹吉他，戴着耳机，午后的阳光洒落
+
+补充细节：twintails, kimono, playing_guitar ~, earphones ~, sunlight
+```
+
+`twintails` / `kimono` / `sunlight` 来自核心词典，`playing_guitar` / `earphones` 来自扩展词库（带 `~`）。
+
+### 扩展层只收 Anima 认识的 tag
+
+33 万条里，绝大多数 tag 是 Anima **没见过**的。实测覆盖率：
+
+| post_count 段 | 在 Anima 表内的比例 |
+| --- | --- |
+| ≥ 10000 | **98.7%** |
+| ≥ 5000 | **98.4%** |
+| ≥ 1000 | 93.1% |
+| ≥ 100 | 27.1% |
+| 全部 | 6.5% |
+
+所以扩展层拿到的每个 tag 都要过一遍 Anima 表，**不在表里的一律丢弃**。这是它和核心词典共用同一条底线：进 prompt 的 tag，模型必须认识。
+
+也正因如此，**没有 `Anima-preview.csv` 时扩展层会自动关闭**——没有校验依据，宁可只用核心词典，也不赌运气。
+
+复验覆盖率：
+
+```bash
+python tools/stats_coverage.py
+```
+
+### 重建扩展词库
+
+`data/tags.sqlite` 是从 ffdkj 的原始数据加工来的（建索引 + 拆分多译名）：
+
+```bash
+python tools/build_tagdb.py                    # 用默认路径
+python tools/build_tagdb.py --src <tag.sqlite> # 指定源文件
+```
+
+### 再补自己的映射
+
+扩了两层还是会漏。编辑 `data/user_dict.json` 手工补：
 
 ```json
 {
@@ -151,27 +214,66 @@ looking_at_viewer     ❌
 **加之前建议先验一下**：不在 Anima 表里的 tag 写了也白写。
 
 ```bash
-python tools/check_tags.py        # 校验现有词典
+python tools/check_tags.py        # 校验核心词典
 python tools/suggest_fixes.py     # 为表外的 tag 反查近似候选
+python tools/stats_coverage.py    # 统计扩展词库的 Anima 覆盖率
 ```
+
+## 打包成 exe
+
+```bash
+python tools/build_exe.py                    # 打包到 dist/
+python tools/build_exe.py --onefile          # 单文件（启动会慢几秒）
+python tools/build_exe.py --clean            # 先清掉 build/dist
+```
+
+产物是 `dist/Anima提示词转换器/`，约 60 MB，含 Python 运行时和数据：
+
+```
+dist/Anima提示词转换器/
+├─ Anima提示词转换器.exe     双击即用，不需要装 Python
+└─ data/
+   ├─ tags.sqlite           扩展词库
+   └─ Anima-preview.csv     若本机有就一并复制（启用扩展层校验）
+```
+
+用 onedir 而非 onefile：onefile 每次启动都要把几十 MB 解压到临时目录，冷启动要好几秒；onedir 是普通目录启动，快得多。
+
+**打包版会写一份 `anima_debug.txt`**（就在 exe 同级目录）。这是刻意留的：exe 是 `--windowed`，没有 stderr，一旦数据文件放错位置就完全静默——只表现为「扩展层用不了」。日志会写清它实际找到了哪些路径：
+
+```
+frozen  = True
+exe     = ...\Anima提示词转换器.exe
+tag 表  = ...\data\Anima-preview.csv
+扩展库  = ...\data\tags.sqlite  exists=True
+```
+
+排查完删掉即可。源码运行时不写，除非设了 `ANIMA_DEBUG=1`。
 
 ## 项目结构
 
 ```
 anima-prompt-tool/
-├─ anima_prompt.py          # 主程序：词典 + 匹配引擎 + 界面
+├─ anima_prompt.py          # 主程序：核心词典 + 匹配引擎 + 界面
+├─ tagdb.py                 # 扩展词库查询层（SQLite + 热数据缓存）
 ├─ LICENSE                  # MIT
 ├─ README.md
 ├─ assets/
 │  ├─ icon.ico              # 应用图标
 │  └─ icon.png
 ├─ data/
-│  └─ user_dict.json        # 你的扩展词库
+│  ├─ tags.sqlite           # 扩展词库（334048 行，33 万中英对照）
+│  ├─ user_dict.json        # 你自己的补充映射
+│  └─ Anima-preview.csv     # 需自备，见上文
 ├─ docs/                    # 界面截图 + 词典收敛记录
 └─ tools/
-   ├─ check_tags.py         # 校验词典 tag 是否都在 Anima 表内
+   ├─ build_tagdb.py        # 加工原始对照表 -> data/tags.sqlite
+   ├─ build_exe.py          # 打包成 exe
+   ├─ check_tags.py         # 校验核心词典 tag 是否都在 Anima 表内
    ├─ suggest_fixes.py      # 为表外的 tag 反查候选
-   ├─ _tagtable.py          # tag 表定位器（被上面两个共用）
+   ├─ stats_coverage.py     # 统计扩展词库的 Anima 覆盖率
+   ├─ _tagtable.py          # tag 表定位器（多脚本共用）
+   ├─ make_icon.py          # 生成应用图标
    ├─ ui_shot.py            # 抓界面截图（PrintWindow，被遮挡也能抓）
    └─ verify_shortcut.py    # 验证桌面快捷方式真能启动
 ```
@@ -194,13 +296,24 @@ anima-prompt-tool/
 
 - 中文分词靠**最长匹配**，不是真正的分词器。罕见表达会被拆成「部分命中 + 未命中」，未命中区会如实报出来。
 - 复合短语如「天台边缘」只能命中「天台」，「边缘」进未命中。要精确匹配就往 `user_dict.json` 里加整条。
-- 词典 331 条覆盖的是高频视觉概念，长尾词需要按需扩。
+- 核心词典 331 条覆盖高频视觉概念；再往外的长尾词靠扩展词库，但扩展层只收 Anima 认识的 tag，所以低频段覆盖有限（见上文覆盖率表）。
+- 扩展层对译名严格精确匹配，所以「午后」查不到（表里的译名是「下午」）。别名要靠 `user_dict.json` 补。
 - 氛围词（安静的、温馨的、浪漫的）在 Anima 表里没有对应 tag，会落进未命中。Anima 支持自然语言，这类描述适合用英文短句写在 prompt 末尾。
 - 窗口尺寸和位置不做记忆。
 
 ## 资源占用
 
-纯 Python 标准库，词典 331 条常驻内存，启动毫秒级，**不占显存**。相比本地跑一个 LLM 做翻译，这是两个数量级的差距。
+实测开销（`data/tags.sqlite` 35 MB，334048 行）：
+
+| 阶段 | 耗时 |
+| --- | --- |
+| 导入 + 读 Anima tag 表（24655 条） | ~55 ms |
+| 加载扩展词库（预载前 4 万条热数据） | ~42 ms |
+| 转换一次输入 | ~0.4 ms |
+
+启动只预载高频段，其余走 SQLite 索引冷查询（`cn = ?` 实测 0.02 ms/次），结果带缓存。所以磁盘上 35 MB 的词库并不需要全塞进内存。
+
+纯 Python 标准库（`tkinter` / `re` / `json` / `sqlite3`），**不占显存**。相比本地跑一个 LLM 做翻译，这是两个数量级的差距。
 
 ## 相比现成方案
 
