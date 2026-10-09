@@ -31,6 +31,11 @@ DIST_EXCLUDE = {"anima_debug.txt"}
 def main() -> int:
     parser = argparse.ArgumentParser(description="制作发布 zip")
     parser.add_argument("--version", default="v0.2.0", help="版本号")
+    parser.add_argument(
+        "--zip-name",
+        default="",
+        help="zip 文件名（默认 anima-prompt-tool-<版本>-win64.zip）",
+    )
     args = parser.parse_args()
 
     if not DIST.is_dir():
@@ -80,7 +85,10 @@ def main() -> int:
     if not ud.exists():
         ud.write_text("{}\n", encoding="utf-8")
 
-    zip_path = RELEASE_DIR / f"Anima提示词转换器-{args.version}.zip"
+    # zip 用 ASCII 文件名：中文名在传输链路上容易被编码破坏
+    # （实测上传到 GitHub 后变成 "Anima.-v0.2.0.zip"）
+    zip_name = args.zip_name or f"anima-prompt-tool-{args.version}-win64.zip"
+    zip_path = RELEASE_DIR / zip_name
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         for f in sorted(stage.rglob("*")):
             if f.is_file():
